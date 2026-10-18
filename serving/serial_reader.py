@@ -5,18 +5,27 @@ line is expected in the format produced by firmware/vibration_monitor.ino:
 
     <rpm>,<sample_1>,<sample_2>,...,<sample_N>
 
-Usage: python serial_reader.py --port /dev/ttyUSB0 [--host http://127.0.0.1:5000]
+Lines that are malformed or contain fewer than WINDOW_SIZE samples
+(for example the startup message, or a line truncated by a serial
+error) are skipped.
+
+Usage: python serial_reader.py --port COM3 [--host http://127.0.0.1:5000]
 """
 import argparse
+import time
 
 import requests
 import serial
 
-SAMPLE_RATE = 4000  # Hz, must match SAMPLE_INTERVAL_US in the firmware
+SAMPLE_RATE = 1000  # Hz, must match SAMPLE_INTERVAL_US in the firmware
+WINDOW_SIZE = 512  # samples, must match WINDOW_SIZE in the firmware
+BOARD_RESET_DELAY_S = 2  # the Uno resets when the serial port is opened
 
 
 def main(port, baud, host):
     ser = serial.Serial(port, baud, timeout=5)
+    time.sleep(BOARD_RESET_DELAY_S)
+    ser.reset_input_buffer()
     print(f"reading from {port} at {baud} baud, forwarding to {host}/ingest")
 
     while True:
@@ -27,11 +36,12 @@ def main(port, baud, host):
         try:
             values = [float(v) for v in line.split(",")]
         except ValueError:
-            print(f"skipping malformed line: {line[:50]}")
+            print(f"skipping non-data line: {line[:60]}")
             continue
 
         rpm, window = values[0], values[1:]
-        if len(window) < 10:
+        if len(window) != WINDOW_SIZE:
+            print(f"skipping incomplete window ({len(window)} samples)")
             continue
 
         payload = {"window": window, "sample_rate": SAMPLE_RATE, "rpm": rpm}

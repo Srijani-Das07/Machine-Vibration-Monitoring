@@ -78,6 +78,13 @@ No physical rig needed. This replays the real MaFaulDa windows into the API.
  
 5. Open `http://127.0.0.1:5000` in a browser. It calibrates on real normal windows, then streams normal followed by imbalance windows -- watch the verdict flip from NORMAL to FAULTY live.
 
-## Usage
+## Usage (hardware mode)
 
-TBD
+1. Upload `firmware/vibration_monitor.ino` to the Arduino Uno with the Arduino IDE. The Serial Monitor (115200 baud) should print `ADXL345 found at 0x53.` Close the Serial Monitor afterwards so the port is free.
+2. Start the API:
+   cd serving
+   python app.py
+3. In a separate terminal, start the serial bridge (replace COM3 with the Arduino's port):
+   cd serving
+   python serial_reader.py --port COM3
+4. Open `http://127.0.0.1:5000`. With the machine running normally, press Start Calibration, wait for about 10 windows, then press Stop Calibration. Live classification starts after calibration.
