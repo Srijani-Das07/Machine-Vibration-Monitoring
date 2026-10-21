@@ -5,11 +5,18 @@ Runtime state (latest window, features, classification, calibration
 status) is held in a single in-memory dict, since this serves one
 physical rig at a time.
 
+Two input modes are supported on /ingest:
+  - Acceleration windows (default): features are z-scored against the
+    calibrated baseline and classified by the trained model.
+  - Speed-fluctuation windows (payload "signal": "speed"): features are
+    z-scored against the calibrated baseline and a window is flagged
+    when its largest deviation exceeds Z_THRESHOLD. The trained model
+    is not used in this mode.
+
 Endpoints:
   GET  /                 dashboard page
   GET  /health            liveness check, used by Render
-  POST /ingest             receive a vibration window, classify it,
-                           update latest state
+  POST /ingest             receive a window, score it, update latest state
   POST /calibrate/start     begin accumulating incoming windows as the
                            calibration set for a new deployment
   POST /calibrate/stop       fit and save a BaselineCalibrator on the
@@ -32,6 +39,10 @@ from model import load_model
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "model_store", "classifier.joblib")
 BASELINE_PATH = os.path.join(BASE_DIR, "model_store", "baseline.json")
+
+SPEED_SIGNAL = "speed"
+Z_THRESHOLD = 4.0  # deviation (in baseline std units) above which a speed window is flagged
+MIN_SCALE_FRACTION = 0.1  # baseline std floor, as a fraction of the baseline mean
 
 app = Flask(
     __name__,
@@ -57,6 +68,21 @@ state = {
 }
 
 
+def score_speed_window(vector):
+    """Returns (label, score) for a speed-fluctuation feature vector.
+
+    The score is the largest absolute deviation from the calibrated
+    baseline, in baseline standard deviations. The baseline std is
+    floored at a fraction of the baseline mean so that a feature with
+    near-zero spread during calibration does not trigger on noise.
+    """
+    scale = np.maximum(calibrator.std_, MIN_SCALE_FRACTION * np.abs(calibrator.mean_)) + 1e-8
+    z = (vector - calibrator.mean_) / scale
+    deviation = float(np.max(np.abs(z)))
+    label = "imbalance" if deviation > Z_THRESHOLD else "normal"
+    return label, deviation
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -73,6 +99,7 @@ def ingest():
     window = payload.get("window")
     sample_rate = payload.get("sample_rate", 4000)
     rpm = payload.get("rpm")
+    signal = payload.get("signal")
 
     if not window:
         return jsonify({"error": "missing 'window'"}), 400
@@ -85,12 +112,16 @@ def ingest():
 
     prediction = None
     probability = None
-    if calibrator.is_fitted and model is not None:
-        normalized = calibrator.transform(vector.reshape(1, -1))
-        pred = model.predict(normalized)[0]
-        proba = model.predict_proba(normalized)[0][1]
-        prediction = "imbalance" if pred == 1 else "normal"
-        probability = float(proba)
+    if calibrator.is_fitted:
+        if signal == SPEED_SIGNAL:
+            prediction, deviation = score_speed_window(vector)
+            probability = deviation / (deviation + Z_THRESHOLD)  # 0.5 at the threshold
+        elif model is not None:
+            normalized = calibrator.transform(vector.reshape(1, -1))
+            pred = model.predict(normalized)[0]
+            proba = model.predict_proba(normalized)[0][1]
+            prediction = "imbalance" if pred == 1 else "normal"
+            probability = float(proba)
 
     w = np.asarray(window, dtype=float)
     spectrum = np.abs(rfft(w - w.mean()))
